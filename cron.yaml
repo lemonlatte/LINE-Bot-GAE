@@ -1,0 +1,4 @@
+cron:
+- description: update air state
+  url: /update/airState
+  schedule: every 30 minutes

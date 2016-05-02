@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/net/context"
 	"google.golang.org/appengine"
+	"google.golang.org/appengine/datastore"
 	"google.golang.org/appengine/log"
 	"google.golang.org/appengine/urlfetch"
 	"io/ioutil"
 	"net/http"
+	"opendata"
+	"strconv"
 )
 
 type LineEventContent struct {
@@ -35,6 +39,8 @@ type LineCallbackBody struct {
 	Result []LineEvent
 }
 
+var emojiMask = "\xf3\xbe\x8c\xae"
+
 const LINE_ENDPOINT = "https://trialbot-api.line.me"
 
 var LINE_HEADERS = map[string]string{
@@ -45,7 +51,43 @@ var LINE_HEADERS = map[string]string{
 
 func init() {
 	http.HandleFunc("/", home)
+	http.HandleFunc("/update/airState", updateAirState)
 	http.HandleFunc("/callback", lineBotCallback)
+}
+
+func getAirStateString(airState map[string]float64) string {
+	var psiReport, pm2_5Report string
+	psi, ok := airState["PSI"]
+	if ok {
+		var level string
+		if psi <= 50 {
+			level = "Green"
+		} else if psi <= 100 {
+			level = "Yellow"
+		} else if psi <= 199 {
+			level = "Red"
+		} else if psi <= 299 {
+			level = "Purple"
+		} else {
+			level = "Brown"
+		}
+		psiReport = fmt.Sprintf("PSI: %.0f (%s)", psi, level)
+	}
+	pm2_5, ok := airState["PM2.5"]
+	if ok {
+		var level string
+		if pm2_5 <= 35 {
+			level = "Green"
+		} else if pm2_5 <= 53 {
+			level = "Yellow"
+		} else if pm2_5 <= 70 {
+			level = "Red"
+		} else {
+			level = "Purple"
+		}
+		pm2_5Report = fmt.Sprintf("PM2.5: %.0f (%s)", pm2_5, level)
+	}
+	return fmt.Sprintf("%s\n%s", psiReport, pm2_5Report)
 }
 
 func lineBotCallback(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +107,7 @@ func lineBotCallback(w http.ResponseWriter, r *http.Request) {
 		result := lineCBBody.Result[0]
 		switch result.EventType {
 		case "138311609100106403":
-			log.Infof(ctx, "Receive Operation %+v", result)
+			// log.Infof(ctx, "Receive Operation %+v", result)
 			to := []string{result.Content.Params[0].(string)}
 			err := lineApi.sendText(to, "Welcome to Jim's Bot.")
 			if err != nil {
@@ -74,9 +116,24 @@ func lineBotCallback(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case "138311609000106303":
-			log.Infof(ctx, "Receive Message %+v", result)
+			var err error
+			// log.Infof(ctx, "Receive Message %+v", result)
 			to := []string{result.Content.From}
-			err := lineApi.sendText(to, fmt.Sprintf("只會學你: %s", result.Content.Text))
+			if result.Content.ContentType == 1 {
+				text := result.Content.Text
+				log.Infof(ctx, "Text Buffer: %+v", []byte(text))
+				switch text {
+				case "Air", "air":
+					airState, err := getAirState(ctx)
+					if err == nil {
+						err = lineApi.sendText(to, getAirStateString(airState))
+					}
+				default:
+					err = lineApi.sendText(to, fmt.Sprintf("%s", text))
+				}
+			} else {
+				err = lineApi.sendText(to, fmt.Sprintf("%s", "喔喔喔，看不懂，請用文字跟我溝通"))
+			}
 			if err != nil {
 				log.Errorf(ctx, err.Error())
 				http.Error(w, "", http.StatusInternalServerError)
@@ -135,6 +192,64 @@ func (lineApi *LineAPIProxy) sendEvent(to []string, content LineEventContent) (e
 		log.Errorf(ctx, string(body))
 	}
 	return
+}
+
+func updateAirState(w http.ResponseWriter, r *http.Request) {
+	ctx := appengine.NewContext(r)
+	asList, err := opendata.GetAirState(ctx)
+
+	if err != nil {
+		log.Errorf(ctx, err.Error())
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+
+	asKeys := []*datastore.Key{}
+	for _, as := range asList {
+		keyName := fmt.Sprintf("%s|%s|%s", as.County, as.SiteName,
+			as.PublishTime.Time.Format("2006-01-02T15:04"))
+		asKeys = append(asKeys, datastore.NewKey(ctx, "AirState", keyName, 0, nil))
+	}
+	_, err = datastore.PutMulti(ctx, asKeys, asList)
+	if err != nil {
+		log.Errorf(ctx, err.Error())
+	}
+	fmt.Fprintf(w, "")
+	return
+}
+
+func strToFloat(s string) (f float64, err error) {
+	f, err = strconv.ParseFloat(s, 64)
+	return
+}
+
+func getAirState(ctx context.Context) (map[string]float64, error) {
+	q := datastore.NewQuery("AirState").Filter("County =", `臺北市`).Filter("SiteName =", `大同`).Order("-PublishTime.Time")
+	var as opendata.AirState
+	for t := q.Run(ctx); ; {
+		key, err := t.Next(&as)
+		if err == datastore.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if key != nil {
+			break
+		}
+	}
+	psi, err := strToFloat(as.PSI)
+	if err != nil {
+		return nil, err
+	}
+	pm2_5, err := strToFloat(as.PM2_5)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]float64{
+		"PSI":   psi,
+		"PM2.5": pm2_5,
+	}, nil
 }
 
 func home(w http.ResponseWriter, r *http.Request) {

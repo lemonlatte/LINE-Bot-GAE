@@ -1,0 +1,19 @@
+indexes:
+- kind: AirState
+  properties:
+  - name: County
+  - name: SiteName
+  - name: PublishTime.Time
+    direction: desc
+
+- kind: AirState
+  properties:
+  - name: County
+  - name: PublishTime.Time
+    direction: desc
+
+- kind: AirState
+  properties:
+  - name: SiteName
+  - name: PublishTime.Time
+    direction: desc
